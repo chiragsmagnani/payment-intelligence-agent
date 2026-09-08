@@ -1,0 +1,7 @@
+agno==3.0.8
+groq
+anthropic
+openai
+streamlit
+python-dotenv
+sqlalchemy
