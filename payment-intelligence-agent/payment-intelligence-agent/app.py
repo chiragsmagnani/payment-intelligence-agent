@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent.payment_agent import build_agent
+from agent.team import build_team
 
 
 load_dotenv()
@@ -19,6 +19,7 @@ SAMPLE_QUESTIONS = [
     "Break down declines by reason category (issuer vs network vs risk).",
     "Which merchant category has the highest chargeback rate?",
     "Compare approval rates across channels (card present, ecom, recurring, wallet).",
+    "Do our risk-category declines look like a fraud attack or an overly aggressive risk rule?",
 ]
 
 st.set_page_config(
@@ -35,14 +36,18 @@ st.caption(
 
 
 def _get_agent():
-    """Create one agent (and one query log) per browser session, and retain
-    the agent's conversation memory across turns within that session."""
+    """Create one team (and one shared query log) per browser session, and
+    retain each specialist's conversation memory across turns within that
+    session. Named `_get_agent` (singular) for historical reasons - it
+    actually returns a two-specialist Team now (see agent/team.py), but the
+    call site below just does `.run(prompt)` either way, so nothing else
+    had to change."""
     if "session_id" not in st.session_state:
         st.session_state.session_id = uuid.uuid4().hex
     if "query_log" not in st.session_state:
         st.session_state.query_log = []
     if "agent" not in st.session_state:
-        st.session_state.agent = build_agent(
+        st.session_state.agent = build_team(
             st.session_state.session_id, query_log=st.session_state.query_log
         )
     return st.session_state.agent
@@ -99,8 +104,12 @@ with st.sidebar:
         "This agent answers questions over a **synthetic** payment "
         "performance dataset (45,000 simulated transactions across "
         "UK / SG / PL markets) using:\n\n"
-        "- a **SQL tool** it writes queries with itself\n"
-        "- a **glossary lookup tool** so it explains metrics correctly\n"
+        "- a **two-specialist agent team**: a router hands each question to "
+        "either the *Payment Performance Assistant* (approval rates, "
+        "market/channel/decline breakdowns) or the *Risk & Fraud Analyst* "
+        "(fraud patterns, risk-rule tuning, chargeback investigation)\n"
+        "- a **SQL tool** each specialist writes queries with itself\n"
+        "- a **glossary lookup tool** so answers use the right definitions\n"
         "- session memory for follow-up questions\n\n"
         "No real cardholder or transaction data is used anywhere."
     )
