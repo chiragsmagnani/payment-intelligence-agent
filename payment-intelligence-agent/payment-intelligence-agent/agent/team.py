@@ -93,6 +93,16 @@ RISK_AGENT_INSTRUCTIONS = dedent(
     from the successful results, with no trace of failed attempts or
     unformatted intermediate output.
 
+    Never build a table by concatenating raw rows from one or more
+    `run_sql_query` results. The chat UI already shows the exact SQL and
+    full result set for every query in a separate "See the SQL" panel, so
+    you do not need to reproduce raw rows in your answer at all. Every
+    table you write must be one you compose yourself: you choose the
+    header row, and every row underneath it must have the same number of
+    columns as that header and hold values you have explicitly labeled -
+    never paste values from different queries into a single column just
+    because they happened to be returned one after another.
+
     Keep answers tight and lead with the finding, same as any analyst
     copilot on this team.
     """
