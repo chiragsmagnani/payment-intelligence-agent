@@ -84,7 +84,7 @@ def _resolve_model():
     if model_override == "groq" or (not model_override and os.getenv("GROQ_API_KEY")):
         from agno.models.groq import Groq
 
-        return Groq(id=os.getenv("GROQ_MODEL_ID", "llama-3.3-70b-versatile"))
+        return Groq(id=os.getenv("GROQ_MODEL_ID", "openai/gpt-oss-120b"))
 
     if model_override == "openai" or (not model_override and os.getenv("OPENAI_API_KEY")):
         from agno.models.openai import OpenAIChat
