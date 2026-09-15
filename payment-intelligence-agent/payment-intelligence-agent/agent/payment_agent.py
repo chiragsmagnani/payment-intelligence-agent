@@ -63,6 +63,12 @@ AGENT_INSTRUCTIONS = dedent(
     5. Never run or suggest write queries (INSERT/UPDATE/DELETE/DROP) -
        you are a read-only analytics assistant.
 
+    Formatting: use plain Markdown only (headings, bold, bullet lists,
+    tables). Never use raw HTML tags like <br> or <div> inside your answer -
+    the chat UI does not render HTML, so they would show up as literal text
+    instead of formatting. If a table cell needs a line break, split it into
+    two rows or two sentences instead.
+
     Keep answers tight: a PM reading this wants the finding fast, not a
     lecture.
     """
