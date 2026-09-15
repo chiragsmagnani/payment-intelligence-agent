@@ -35,6 +35,22 @@ st.caption(
 )
 
 
+def _looks_like_provider_error(text: str) -> bool:
+    """Detect when the model provider's raw error JSON leaked into the
+    answer text instead of being raised as a normal exception.
+
+    Groq (and other OpenAI-compatible providers) sometimes return an error
+    payload like {"error": {"message": "...", "code": "rate_limit_exceeded"}}
+    as the response *content* rather than raising - this happens when a
+    rate limit or transient provider error occurs mid-response. Agno's
+    FallbackConfig doesn't always catch this shape, so without this check
+    the raw JSON would be shown to the user verbatim as if it were the
+    agent's actual answer.
+    """
+    lowered = text.lower()
+    return '"error"' in lowered and ("rate_limit" in lowered or '"code"' in lowered)
+
+
 def _get_agent():
     """Create one team (and one shared query log) per browser session, and
     retain each specialist's conversation memory across turns within that
@@ -170,6 +186,13 @@ if prompt:
             try:
                 response = agent.run(prompt)
                 answer = response.content or "I could not produce an answer for that question."
+                if _looks_like_provider_error(answer):
+                    answer = (
+                        "This demo just hit a temporary rate limit on the "
+                        "free-tier model (a lot of tool calls in one answer can "
+                        "briefly exceed it). Please ask again — it almost "
+                        "always clears within a few seconds."
+                    )
             except Exception as exc:
                 answer = (
                     "I couldn't answer that right now. "
