@@ -51,6 +51,31 @@ def _looks_like_provider_error(text: str) -> bool:
     return '"error"' in lowered and ("rate_limit" in lowered or '"code"' in lowered)
 
 
+def _strip_leaked_query_dumps(text: str) -> str:
+    """Strip any leaked raw-tool-output lines from the model's answer
+    before displaying it.
+
+    Despite explicit instructions not to, the free-tier model this project
+    defaults to occasionally prefixes its answer with a run-on line that
+    mashes together the SQL tool's rejection error and/or several raw query
+    results - visible as a wall of "|"-separated values with no real line
+    breaks, using raw SQL column names instead of the polished headers the
+    model uses in its actual answer further down. Prompt instructions alone
+    don't reliably stop a smaller model from doing this, so this is a
+    code-level safety net: any line that reads like a leaked dump (an
+    abnormal number of "|" characters, or the literal SQL rejection text)
+    is dropped before the answer is shown. A legitimate markdown table row
+    never comes close to this many columns, so the threshold is safe.
+    """
+    cleaned_lines = [
+        line
+        for line in text.split("\n")
+        if "only select queries are allowed" not in line.lower() and line.count("|") <= 15
+    ]
+    cleaned = "\n".join(cleaned_lines).strip()
+    return cleaned or text  # never return an empty answer - fall back to the original
+
+
 def _get_agent():
     """Create one team (and one shared query log) per browser session, and
     retain each specialist's conversation memory across turns within that
@@ -186,6 +211,7 @@ if prompt:
             try:
                 response = agent.run(prompt)
                 answer = response.content or "I could not produce an answer for that question."
+                answer = _strip_leaked_query_dumps(answer)
                 if _looks_like_provider_error(answer):
                     answer = (
                         "This demo just hit a temporary rate limit on the "
