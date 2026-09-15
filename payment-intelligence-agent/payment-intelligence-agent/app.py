@@ -58,7 +58,7 @@ if prompt := st.chat_input("Ask a payment performance question"):
         )
         st.stop()
 
-    st.session_state.messages.append({"role": "user", "content": prompt})    with st.chat_message("user"):
+    st.session_state.messages.append({"role": "user", "content": prompt}) with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
