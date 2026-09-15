@@ -20,11 +20,12 @@ whichever API key you have via environment variables (see .env.example).
 import os
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 
-from .tools import SCHEMA_DESCRIPTION, run_sql_query, search_glossary
+from .tools import SCHEMA_DESCRIPTION, make_tools
 
 SESSION_DB_PATH = Path(__file__).parent.parent / "data" / "agent_sessions.db"
 
@@ -84,7 +85,7 @@ def _resolve_model():
     if model_override == "groq" or (not model_override and os.getenv("GROQ_API_KEY")):
         from agno.models.groq import Groq
 
-        return Groq(id=os.getenv("GROQ_MODEL_ID", "openai/gpt-oss-120b"))
+        return Groq(id=os.getenv("GROQ_MODEL_ID", "llama-3.3-70b-versatile"))
 
     if model_override == "openai" or (not model_override and os.getenv("OPENAI_API_KEY")):
         from agno.models.openai import OpenAIChat
@@ -103,9 +104,22 @@ def _resolve_model():
     )
 
 
-def build_agent(session_id: str | None = None) -> Agent:
-    """Construct the Payment Performance Intelligence Assistant agent."""
+def build_agent(session_id: str | None = None, query_log: list[dict[str, Any]] | None = None) -> Agent:
+    """Construct the Payment Performance Intelligence Assistant agent.
 
+    `query_log`, if provided, is the list that `run_sql_query` appends to on
+    every successful query (sql text + columns + rows). The UI layer
+    (app.py) passes in a list it holds onto per browser session, then reads
+    the last entry after each `agent.run(...)` call to show the exact SQL
+    behind an answer and, where possible, render a chart from it - without
+    the agent itself needing to know anything about charts or transparency
+    UI. If omitted, a throwaway list is used (tools still work, there's just
+    nothing outside the agent watching the log).
+    """
+    if query_log is None:
+        query_log = []
+
+    run_sql_query, search_glossary = make_tools(query_log)
     db = SqliteDb(db_file=str(SESSION_DB_PATH))
 
     return Agent(
