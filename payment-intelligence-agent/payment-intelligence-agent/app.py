@@ -2,6 +2,7 @@
 
 import uuid
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -11,6 +12,14 @@ from agent.payment_agent import build_agent
 load_dotenv()
 
 MAX_MESSAGES_PER_SESSION = 20  # simple abuse/cost guardrail for a public demo
+
+SAMPLE_QUESTIONS = [
+    "What's our overall approval rate, and how does it vary by market?",
+    "Was there a dip in approval rate in the last 6 months? When, and why?",
+    "Break down declines by reason category (issuer vs network vs risk).",
+    "Which merchant category has the highest chargeback rate?",
+    "Compare approval rates across channels (card present, ecom, recurring, wallet).",
+]
 
 st.set_page_config(
     page_title="Payment Performance Intelligence Assistant",
@@ -26,12 +35,82 @@ st.caption(
 
 
 def _get_agent():
-    """Create one agent per browser session and retain its conversation memory."""
+    """Create one agent (and one query log) per browser session, and retain
+    the agent's conversation memory across turns within that session."""
     if "session_id" not in st.session_state:
         st.session_state.session_id = uuid.uuid4().hex
+    if "query_log" not in st.session_state:
+        st.session_state.query_log = []
     if "agent" not in st.session_state:
-        st.session_state.agent = build_agent(st.session_state.session_id)
+        st.session_state.agent = build_agent(
+            st.session_state.session_id, query_log=st.session_state.query_log
+        )
     return st.session_state.agent
+
+
+def _dataframe_from_log_entry(entry: dict) -> pd.DataFrame | None:
+    """Turn a captured {sql, columns, rows} log entry into a DataFrame, or
+    None if there's nothing chartable (no rows, or only one column)."""
+    if not entry.get("rows") or not entry.get("columns") or len(entry["columns"]) < 2:
+        return None
+    return pd.DataFrame(entry["rows"], columns=entry["columns"])
+
+
+def _render_chart_if_useful(df: pd.DataFrame) -> None:
+    """Best-effort auto-chart: a date-like column becomes a line chart's
+    x-axis; otherwise, one categorical column plus at least one numeric
+    column becomes a bar chart. Silently does nothing if the shape doesn't
+    fit either pattern - this is a bonus visualization, not a guarantee."""
+    date_col = next((c for c in df.columns if "date" in c.lower()), None)
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+    if date_col and numeric_cols:
+        chart_df = df.copy()
+        chart_df[date_col] = pd.to_datetime(chart_df[date_col], errors="coerce")
+        chart_df = chart_df.dropna(subset=[date_col]).set_index(date_col)
+        st.line_chart(chart_df[numeric_cols])
+        return
+
+    categorical_cols = [c for c in df.columns if c not in numeric_cols]
+    if len(categorical_cols) == 1 and numeric_cols and 1 < len(df) <= 30:
+        chart_df = df.set_index(categorical_cols[0])
+        st.bar_chart(chart_df[numeric_cols])
+
+
+def _render_query_transparency(query_log: list[dict], before_count: int) -> None:
+    """Show the SQL the agent ran (and a chart, where useful) for this turn.
+    `before_count` is the log length before this turn's agent.run() call, so
+    only queries from *this* turn are shown, not the whole session's history."""
+    new_entries = query_log[before_count:]
+    if not new_entries:
+        return
+
+    with st.expander(f"🔍 See the {len(new_entries)} SQL quer{'y' if len(new_entries) == 1 else 'ies'} behind this answer"):
+        for i, entry in enumerate(new_entries, start=1):
+            st.code(entry["sql"], language="sql")
+            df = _dataframe_from_log_entry(entry)
+            if df is not None:
+                _render_chart_if_useful(df)
+
+
+with st.sidebar:
+    st.header("About this demo")
+    st.markdown(
+        "This agent answers questions over a **synthetic** payment "
+        "performance dataset (45,000 simulated transactions across "
+        "UK / SG / PL markets) using:\n\n"
+        "- a **SQL tool** it writes queries with itself\n"
+        "- a **glossary lookup tool** so it explains metrics correctly\n"
+        "- session memory for follow-up questions\n\n"
+        "No real cardholder or transaction data is used anywhere."
+    )
+    st.header("Try asking")
+    for q in SAMPLE_QUESTIONS:
+        if st.button(q, key=f"sample_{hash(q)}", use_container_width=True):
+            st.session_state.queued_prompt = q
+    if st.button("🔄 Reset conversation"):
+        st.session_state.clear()
+        st.rerun()
 
 
 if "messages" not in st.session_state:
@@ -48,8 +127,21 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if message.get("query_log_slice"):
+            with st.expander(
+                f"🔍 See the SQL {'query' if len(message['query_log_slice']) == 1 else 'queries'} behind this answer"
+            ):
+                for entry in message["query_log_slice"]:
+                    st.code(entry["sql"], language="sql")
+                    df = _dataframe_from_log_entry(entry)
+                    if df is not None:
+                        _render_chart_if_useful(df)
 
-if prompt := st.chat_input("Ask a payment performance question"):
+prompt = st.chat_input("Ask a payment performance question") or st.session_state.pop(
+    "queued_prompt", None
+)
+
+if prompt:
     if len(st.session_state.messages) >= MAX_MESSAGES_PER_SESSION:
         st.warning(
             "This demo session has hit its message limit (a safeguard against "
@@ -64,8 +156,10 @@ if prompt := st.chat_input("Ask a payment performance question"):
 
     with st.chat_message("assistant"):
         with st.spinner("Analyzing payment performance…"):
+            agent = _get_agent()
+            log_before = len(st.session_state.query_log)
             try:
-                response = _get_agent().run(prompt)
+                response = agent.run(prompt)
                 answer = response.content or "I could not produce an answer for that question."
             except Exception as exc:
                 answer = (
@@ -73,5 +167,9 @@ if prompt := st.chat_input("Ask a payment performance question"):
                     f"Please check the app configuration and try again. ({exc})"
                 )
         st.markdown(answer)
+        query_log_slice = st.session_state.query_log[log_before:]
+        _render_query_transparency(st.session_state.query_log, log_before)
 
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": answer, "query_log_slice": query_log_slice}
+    )
