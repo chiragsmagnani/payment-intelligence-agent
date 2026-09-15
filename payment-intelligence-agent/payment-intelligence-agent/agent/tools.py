@@ -16,12 +16,20 @@ The two tools the agent has access to:
 Keeping this dependency-light (sqlite3 + stdlib, no vector store) is a
 deliberate product decision for a portfolio project: anyone cloning the repo
 can run it with just an LLM API key, no extra infra to stand up.
+
+`make_tools(query_log)` is a factory rather than two bare module-level
+tools: it lets the UI layer (app.py) pass in a plain list that
+`run_sql_query` appends to on every successful call. The Streamlit app then
+reads the last entry after `agent.run(...)` to show the exact SQL that was
+executed and, where the shape of the result supports it, render a chart -
+without the agent having to do anything chart-specific itself.
 """
 
 import re
 import sqlite3
 from pathlib import Path
 from textwrap import dedent
+from typing import Any, Callable
 
 from agno.tools import tool
 
@@ -64,66 +72,85 @@ SCHEMA_DESCRIPTION = dedent(
 ).strip()
 
 
-@tool(show_result=True)
-def run_sql_query(sql_query: str) -> str:
-    """Run a read-only SQL SELECT query against the payment performance
-    database and return the results as a markdown table.
-
-    Use this to compute approval rates, decline breakdowns, volumes,
-    trends over time, comparisons across markets/merchant categories/
-    channels, chargeback rates, etc. Always GROUP BY / ORDER BY / LIMIT
-    sensibly so results stay small and readable.
-
-    Args:
-        sql_query: A single read-only SQL SELECT statement.
-
-    Returns:
-        The query result as a markdown table, or an error message.
-    """
-    if not sql_query.strip().lower().startswith("select"):
-        return "Error: only SELECT queries are allowed."
-    if _DISALLOWED.search(sql_query):
-        return "Error: query contains a disallowed keyword. Read-only SELECT queries only."
-
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute(sql_query)
-        rows = cursor.fetchall()
-        columns = [d[0] for d in cursor.description] if cursor.description else []
-        conn.close()
-    except sqlite3.Error as e:
-        return f"SQL error: {e}"
-
-    if not rows:
-        return "Query ran successfully but returned no rows."
-
+def _rows_to_markdown(columns: list[str], rows: list[sqlite3.Row]) -> str:
     header = "| " + " | ".join(columns) + " |"
     separator = "| " + " | ".join(["---"] * len(columns)) + " |"
     body = "\n".join("| " + " | ".join(str(row[c]) for c in columns) + " |" for row in rows[:50])
     truncated_note = "\n\n_(truncated to first 50 rows)_" if len(rows) > 50 else ""
-
     return f"{header}\n{separator}\n{body}{truncated_note}"
 
 
-@tool(show_result=True)
-def search_glossary(keyword: str) -> str:
-    """Search the internal payments glossary for a keyword and return the
-    matching section(s). Use this before explaining a metric (approval
-    rate, chargeback rate, decline categories, etc.) so the explanation
-    uses the correct domain definition rather than a guess.
-
-    Args:
-        keyword: A term to look up, e.g. "chargeback", "decline reason",
-            "approval rate", "dip".
-
-    Returns:
-        The matching glossary section(s), or a not-found message.
+def make_tools(query_log: list[dict[str, Any]]) -> tuple[Callable, Callable]:
+    """Build the two agent tools, wired to append successful SQL queries
+    (query text + columns + rows) to `query_log`. Pass a fresh list per
+    agent/session so one browser session's query history doesn't leak into
+    another's UI.
     """
-    text = GLOSSARY_PATH.read_text()
-    sections = re.split(r"\n(?=##? )", text)
 
-    matches = [s for s in sections if keyword.lower() in s.lower()]
-    if not matches:
-        return f"No glossary section matched '{keyword}'. Try a broader term."
-    return "\n\n---\n\n".join(matches[:3])
+    @tool(show_result=True)
+    def run_sql_query(sql_query: str) -> str:
+        """Run a read-only SQL SELECT query against the payment performance
+        database and return the results as a markdown table.
+
+        Use this to compute approval rates, decline breakdowns, volumes,
+        trends over time, comparisons across markets/merchant categories/
+        channels, chargeback rates, etc. Always GROUP BY / ORDER BY / LIMIT
+        sensibly so results stay small and readable.
+
+        Args:
+            sql_query: A single read-only SQL SELECT statement.
+
+        Returns:
+            The query result as a markdown table, or an error message.
+        """
+        if not sql_query.strip().lower().startswith("select"):
+            return "Error: only SELECT queries are allowed."
+        if _DISALLOWED.search(sql_query):
+            return "Error: query contains a disallowed keyword. Read-only SELECT queries only."
+
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(sql_query)
+            rows = cursor.fetchall()
+            columns = [d[0] for d in cursor.description] if cursor.description else []
+            conn.close()
+        except sqlite3.Error as e:
+            return f"SQL error: {e}"
+
+        if not rows:
+            query_log.append({"sql": sql_query, "columns": columns, "rows": []})
+            return "Query ran successfully but returned no rows."
+
+        query_log.append(
+            {
+                "sql": sql_query,
+                "columns": columns,
+                "rows": [tuple(row) for row in rows[:200]],
+            }
+        )
+        return _rows_to_markdown(columns, rows)
+
+    @tool(show_result=True)
+    def search_glossary(keyword: str) -> str:
+        """Search the internal payments glossary for a keyword and return the
+        matching section(s). Use this before explaining a metric (approval
+        rate, chargeback rate, decline categories, etc.) so the explanation
+        uses the correct domain definition rather than a guess.
+
+        Args:
+            keyword: A term to look up, e.g. "chargeback", "decline reason",
+                "approval rate", "dip".
+
+        Returns:
+            The matching glossary section(s), or a not-found message.
+        """
+        text = GLOSSARY_PATH.read_text()
+        sections = re.split(r"\n(?=##? )", text)
+
+        matches = [s for s in sections if keyword.lower() in s.lower()]
+        if not matches:
+            return f"No glossary section matched '{keyword}'. Try a broader term."
+        return "\n\n---\n\n".join(matches[:3])
+
+    return run_sql_query, search_glossary
