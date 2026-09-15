@@ -1,5 +1,6 @@
 """Streamlit chat interface for the Payment Performance Intelligence Assistant."""
 
+import re
 import uuid
 
 import pandas as pd
@@ -73,6 +74,50 @@ def _strip_leaked_query_dumps(text: str) -> str:
         if "only select queries are allowed" not in line.lower() and line.count("|") <= 15
     ]
     cleaned = "\n".join(cleaned_lines).strip()
+    return cleaned or text  # never return an empty answer - fall back to the original
+
+
+_TABLE_SEPARATOR_LINE = re.compile(r"^[\s\-|]+$")
+
+
+def _strip_leaked_table_dumps(text: str) -> str:
+    """Strip a leading block of concatenated raw query-result tables from
+    the model's answer.
+
+    This catches a second, sneakier shape of the same leak
+    `_strip_leaked_query_dumps` targets: instead of one overloaded line,
+    the model sometimes pastes several *properly formatted* mini-tables
+    from different `run_sql_query` calls back to back, using raw SQL
+    column names (total_txns, approved_chargebacks, ...) instead of the
+    clean labels it uses in its real answer further down. A single
+    legitimate markdown table only ever has one "---" separator row; two
+    or more separator-looking rows in a row means multiple raw results got
+    stitched together. When that's detected, everything up through the
+    last such separator is dropped, keeping only the well-formed answer
+    that follows (which always starts with a heading or a plain sentence,
+    not another raw table row).
+    """
+    lines = text.split("\n")
+
+    # Find the leading block: starting from the very top, lines that are
+    # blank or "table-like" (contain a "|"). The block ends at the first
+    # line with real content but no "|" - that's where actual prose or a
+    # heading begins, i.e. the real answer.
+    end_of_block = len(lines)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and "|" not in stripped:
+            end_of_block = i
+            break
+
+    leading_block = lines[:end_of_block]
+    separator_count = sum(
+        1 for line in leading_block if line.strip() and _TABLE_SEPARATOR_LINE.match(line.strip())
+    )
+    if separator_count < 2:
+        return text  # a normal single table has exactly one separator row
+
+    cleaned = "\n".join(lines[end_of_block:]).strip()
     return cleaned or text  # never return an empty answer - fall back to the original
 
 
@@ -212,6 +257,7 @@ if prompt:
                 response = agent.run(prompt)
                 answer = response.content or "I could not produce an answer for that question."
                 answer = _strip_leaked_query_dumps(answer)
+                answer = _strip_leaked_table_dumps(answer)
                 if _looks_like_provider_error(answer):
                     answer = (
                         "This demo just hit a temporary rate limit on the "
@@ -229,5 +275,4 @@ if prompt:
         _render_query_transparency(st.session_state.query_log, log_before)
 
     st.session_state.messages.append(
-        {"role": "assistant", "content": answer, "query_log_slice": query_log_slice}
-    )
+        {"role": "assistant", "content": answer, "query_log_slice":
