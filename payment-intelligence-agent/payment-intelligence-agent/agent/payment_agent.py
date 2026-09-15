@@ -22,7 +22,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
-from agno.agent import Agent
+from agno.agent import Agent, FallbackConfig
 from agno.db.sqlite import SqliteDb
 
 from .tools import SCHEMA_DESCRIPTION, make_tools
@@ -69,39 +69,80 @@ AGENT_INSTRUCTIONS = dedent(
 ).strip()
 
 
-def _resolve_model():
+def _resolve_model() -> tuple[Any, str]:
     """Pick whichever model backend has an API key configured.
 
-    Defaults to Groq (free, no card required, fast Llama inference) if
+    Defaults to Groq (free, no card required, fast inference) if
     GROQ_API_KEY is set - this is the recommended path for anyone cloning
     the repo to try it with zero cost/friction. Falls back to Anthropic
     Claude or OpenAI if those keys are set instead, so the project can
     still be pointed at a frontier model. Raises a clear error if nothing
     is configured, since a portfolio reviewer running this for the first
     time will hit this immediately if they skip the README.
+
+    Returns (model_instance, provider_name) - the provider name is used by
+    `_resolve_fallback_config` to decide whether/how to wire up automatic
+    fallback models.
     """
     model_override = os.getenv("AGENT_MODEL_PROVIDER", "").lower()
 
     if model_override == "groq" or (not model_override and os.getenv("GROQ_API_KEY")):
         from agno.models.groq import Groq
 
-        return Groq(id=os.getenv("GROQ_MODEL_ID", "llama-3.3-70b-versatile"))
+        return Groq(id=os.getenv("GROQ_MODEL_ID", "openai/gpt-oss-120b")), "groq"
 
     if model_override == "openai" or (not model_override and os.getenv("OPENAI_API_KEY")):
         from agno.models.openai import OpenAIChat
 
-        return OpenAIChat(id=os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini"))
+        return OpenAIChat(id=os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")), "openai"
 
     if model_override == "anthropic" or (not model_override and os.getenv("ANTHROPIC_API_KEY")):
         from agno.models.anthropic import Claude
 
-        return Claude(id=os.getenv("ANTHROPIC_MODEL_ID", "claude-sonnet-4-5"))
+        return Claude(id=os.getenv("ANTHROPIC_MODEL_ID", "claude-sonnet-4-5")), "anthropic"
 
     raise RuntimeError(
         "No LLM API key found. Set GROQ_API_KEY (recommended - free, no "
         "card required, see .env.example), or ANTHROPIC_API_KEY / "
         "OPENAI_API_KEY, before running the agent."
     )
+
+
+def _resolve_fallback_config(provider: str) -> FallbackConfig | None:
+    """Build a rate-limit/error fallback chain of alternate models on the
+    same provider as the primary model.
+
+    This exists for a concrete reason, not just theoretical robustness: the
+    free-tier Groq path this project defaults to can hit rate limits under
+    real demo traffic, and providers occasionally retire/rename a model
+    entirely (this happened once already during development - the original
+    default model, llama-3.3-70b-versatile, was retired by Groq and started
+    returning "model_not_found"). Rather than the whole chatbot going down
+    when that happens, Agno's built-in FallbackConfig automatically retries
+    the request against the next model in the list.
+
+    Only wired up for Groq today (the recommended, free path). Customize the
+    fallback order via GROQ_FALLBACK_MODEL_IDS (comma-separated) if Groq
+    changes their lineup again - check console.groq.com for current model
+    IDs, since these do change over time.
+    """
+    if provider != "groq":
+        return None
+
+    from agno.models.groq import Groq
+
+    fallback_ids = [
+        model_id.strip()
+        for model_id in os.getenv(
+            "GROQ_FALLBACK_MODEL_IDS", "llama-3.1-8b-instant,groq/compound-mini"
+        ).split(",")
+        if model_id.strip()
+    ]
+    if not fallback_ids:
+        return None
+
+    fallback_models = [Groq(id=model_id) for model_id in fallback_ids]
+    return FallbackConfig(on_rate_limit=fallback_models, on_error=fallback_models)
 
 
 def build_agent(session_id: str | None = None, query_log: list[dict[str, Any]] | None = None) -> Agent:
@@ -121,10 +162,12 @@ def build_agent(session_id: str | None = None, query_log: list[dict[str, Any]] |
 
     run_sql_query, search_glossary = make_tools(query_log)
     db = SqliteDb(db_file=str(SESSION_DB_PATH))
+    model, provider = _resolve_model()
 
     return Agent(
         name="Payment Performance Intelligence Assistant",
-        model=_resolve_model(),
+        model=model,
+        fallback_config=_resolve_fallback_config(provider),
         db=db,
         session_id=session_id,
         tools=[run_sql_query, search_glossary],
