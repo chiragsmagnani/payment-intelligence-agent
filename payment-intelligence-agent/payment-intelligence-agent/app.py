@@ -10,6 +10,8 @@ from agent.payment_agent import build_agent
 
 load_dotenv()
 
+MAX_MESSAGES_PER_SESSION = 20  # simple abuse/cost guardrail for a public demo
+
 st.set_page_config(
     page_title="Payment Performance Intelligence Assistant",
     page_icon="💳",
@@ -48,8 +50,15 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 if prompt := st.chat_input("Ask a payment performance question"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
+    if len(st.session_state.messages) >= MAX_MESSAGES_PER_SESSION:
+        st.warning(
+            "This demo session has hit its message limit (a safeguard against "
+            "free-tier API abuse on a public demo). Refresh the page to start "
+            "a new session."
+        )
+        st.stop()
+
+    st.session_state.messages.append({"role": "user", "content": prompt})    with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
