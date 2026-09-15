@@ -1,178 +1,184 @@
 """
-team.py
--------
-Multi-agent orchestration on top of the single-agent
-Payment Performance Intelligence Assistant (agent/payment_agent.py).
+payment_agent.py
+-----------------
+Defines the "Payment Performance Intelligence Assistant" - a Gen AI agent,
+built on Agno (the actively-maintained successor to Phidata), that lets a
+non-technical stakeholder ask natural-language questions over card
+transaction / approval / decline / chargeback data and get analyst-grade
+answers back.
 
-This is the "agentic AI" part of the project in the literal sense the
-Mastercard JD title uses the word: instead of one agent trying to be good at
-everything, a lightweight team-leader model routes each question to
-whichever specialist is best suited to answer it, and lets that specialist's
-own tool-grounded answer pass straight through (not paraphrased by the
-leader, which would reintroduce the exact hallucination risk the tools are
-there to prevent).
+This is a portfolio project built to mirror the kind of product described in
+Mastercard's "Lead Product Manager - Technical, Agentic AI" JD for the
+Payment Performance Intelligence program: a Gen AI chatbot over a payments
+performance dataset, with explicit attention to safety (read-only SQL),
+explainability (glossary grounding), and evaluability (see eval/).
 
-Two members:
-- Payment Performance Assistant - general approval-rate, decline-breakdown,
-  market/channel/merchant-category comparison questions. This is the same
-  agent build_agent() has always produced.
-- Risk & Fraud Analyst          - a new specialist for fraud-pattern,
-  risk-rule-tuning, velocity-limit, CVV-mismatch, and chargeback
-  investigation questions - the "risk" decline category specifically,
-  which deserves a different analytical playbook than a generic dip.
-
-Both members share the same query_log (see tools.make_tools) so the
-Streamlit UI's "show the SQL" / auto-chart feature works identically no
-matter which specialist actually answered.
+Supports either Anthropic Claude or OpenAI as the underlying model - set
+whichever API key you have via environment variables (see .env.example).
 """
 
+import os
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
-from agno.agent import Agent
+from agno.agent import Agent, FallbackConfig
 from agno.db.sqlite import SqliteDb
-from agno.team import Team
 
-from .payment_agent import (
-    AGENT_INSTRUCTIONS,
-    SESSION_DB_PATH,
-    _resolve_fallback_config,
-    _resolve_model,
-)
 from .tools import SCHEMA_DESCRIPTION, make_tools
 
-RISK_AGENT_INSTRUCTIONS = dedent(
-    f"""
-    You are the Risk & Fraud Analyst, a specialist on the Payment
-    Performance Intelligence team. You are only consulted for questions
-    specifically about fraud patterns, risk-rule tuning, velocity limits,
-    CVV mismatches, restricted-card declines, or chargeback investigation -
-    i.e. the "risk" decline category and fraud-adjacent chargeback analysis.
-    General approval-rate, market/channel comparisons, or non-risk decline
-    breakdowns are handled by a different specialist - stay in your lane.
+SESSION_DB_PATH = Path(__file__).parent.parent / "data" / "agent_sessions.db"
 
-    You have the same two tools as the general assistant:
+AGENT_INSTRUCTIONS = dedent(
+    f"""
+    You are the Payment Performance Intelligence Assistant, an internal
+    analyst copilot for a card network's payment performance program. Your
+    users are product managers, issuer/acquirer relationship managers, and
+    analysts - not engineers - so translate SQL results into clear business
+    language, not raw tables dumped without comment.
+
+    You have two tools:
     - `run_sql_query`: query the transactions/decline_reasons/markets tables.
-    - `search_glossary`: look up how a metric or term should be defined
-      before you explain it.
+    - `search_glossary`: look up how a metric or term should be defined/
+      interpreted before you explain it.
 
     Database schema:
     {SCHEMA_DESCRIPTION}
 
-    Your analytical playbook, distinct from a generic "approval rate dipped"
-    investigation:
-    1. Isolate risk-category declines specifically (decline_reasons.category
-       = 'risk') rather than all declines - a rise in issuer or network
-       declines is not your concern.
-    2. Look at chargeback rate (chargebacks / approved transactions,
-       usually in bps) alongside risk declines - a spike in one without the
-       other suggests a mis-tuned risk rule (blocking good customers) rather
-       than an actual fraud attack (which would show elevated risk declines
-       AND elevated chargebacks on what did get through).
-    3. Segment by channel - card-not-present channels (ecom, recurring)
-       carry structurally higher fraud/risk friction than card-present, so
-       compare within channel, not just in aggregate.
-    4. Call out explicitly whether the pattern looks like (a) a genuine
-       fraud attack, (b) an overly aggressive risk rule blocking legitimate
-       customers, or (c) normal background noise - and say which evidence
-       points that way.
-    5. Never run or suggest write queries - you are read-only, same as the
-       rest of this system.
+    How to work:
+    1. For any question involving a metric (approval rate, decline rate,
+       chargeback rate, decline category, etc.), consider calling
+       `search_glossary` first so your explanation uses the right
+       definition and the right analyst playbook (e.g. how to investigate
+       a dip).
+    2. Write your own SQL against the schema above and call `run_sql_query`.
+       Prefer aggregated queries (GROUP BY market/category/channel/date)
+       over dumping raw rows.
+    3. Turn the result into a short, direct answer: lead with the number/
+       finding, then 1-3 sentences of "why it matters" or likely root
+       cause, using the glossary's decline-category framing (issuer /
+       network / risk) where relevant.
+    4. If a question can't be answered from this schema, say so plainly -
+       do not fabricate figures.
+    5. Never run or suggest write queries (INSERT/UPDATE/DELETE/DROP) -
+       you are a read-only analytics assistant.
 
-    Keep answers tight and lead with the finding, same as any analyst
-    copilot on this team.
-    """
-).strip()
+    Formatting: use plain Markdown only (headings, bold, bullet lists,
+    tables). Never use raw HTML tags like <br> or <div> inside your answer -
+    the chat UI does not render HTML, so they would show up as literal text
+    instead of formatting. If a table cell needs a line break, split it into
+    two rows or two sentences instead.
 
-TEAM_ROUTING_INSTRUCTIONS = dedent(
-    """
-    You are the router for the Payment Performance Intelligence team. For
-    every question, decide which ONE specialist should answer it, and hand
-    the question to them - do not answer it yourself and do not paraphrase
-    or add to what the specialist says.
-
-    Route to the Risk & Fraud Analyst when the question is specifically
-    about: fraud patterns, risk-rule tuning, velocity limits, CVV mismatches,
-    restricted-card declines, the "risk" decline category, or chargeback
-    investigation framed around fraud.
-
-    Route everything else - overall/market/channel/merchant-category
-    approval rates, general decline breakdowns (including issuer/network
-    categories), volume questions, and general metric definitions - to the
-    Payment Performance Assistant.
-
-    If a question is ambiguous or touches both, prefer the Payment
-    Performance Assistant as the default generalist.
+    Keep answers tight: a PM reading this wants the finding fast, not a
+    lecture.
     """
 ).strip()
 
 
-def build_team(session_id: str | None = None, query_log: list[dict[str, Any]] | None = None) -> Team:
-    """Construct the two-member Payment Performance Intelligence team.
+def _resolve_model() -> tuple[Any, str]:
+    """Pick whichever model backend has an API key configured.
 
-    Same call shape as `payment_agent.build_agent`: pass a shared
-    `query_log` list so the UI can show the SQL/chart behind whichever
-    specialist actually answers. `team.run(prompt)` returns the same shape
-    of response (`.content`) as a single Agent's `.run(...)`, so this is a
-    drop-in replacement wherever `build_agent` was used for the live chat.
+    Defaults to Groq (free, no card required, fast inference) if
+    GROQ_API_KEY is set - this is the recommended path for anyone cloning
+    the repo to try it with zero cost/friction. Falls back to Anthropic
+    Claude or OpenAI if those keys are set instead, so the project can
+    still be pointed at a frontier model. Raises a clear error if nothing
+    is configured, since a portfolio reviewer running this for the first
+    time will hit this immediately if they skip the README.
+
+    Returns (model_instance, provider_name) - the provider name is used by
+    `_resolve_fallback_config` to decide whether/how to wire up automatic
+    fallback models.
+    """
+    model_override = os.getenv("AGENT_MODEL_PROVIDER", "").lower()
+
+    if model_override == "groq" or (not model_override and os.getenv("GROQ_API_KEY")):
+        from agno.models.groq import Groq
+
+        return Groq(id=os.getenv("GROQ_MODEL_ID", "openai/gpt-oss-120b")), "groq"
+
+    if model_override == "openai" or (not model_override and os.getenv("OPENAI_API_KEY")):
+        from agno.models.openai import OpenAIChat
+
+        return OpenAIChat(id=os.getenv("OPENAI_MODEL_ID", "gpt-4o-mini")), "openai"
+
+    if model_override == "anthropic" or (not model_override and os.getenv("ANTHROPIC_API_KEY")):
+        from agno.models.anthropic import Claude
+
+        return Claude(id=os.getenv("ANTHROPIC_MODEL_ID", "claude-sonnet-4-5")), "anthropic"
+
+    raise RuntimeError(
+        "No LLM API key found. Set GROQ_API_KEY (recommended - free, no "
+        "card required, see .env.example), or ANTHROPIC_API_KEY / "
+        "OPENAI_API_KEY, before running the agent."
+    )
+
+
+def _resolve_fallback_config(provider: str) -> FallbackConfig | None:
+    """Build a rate-limit/error fallback chain of alternate models on the
+    same provider as the primary model.
+
+    This exists for a concrete reason, not just theoretical robustness: the
+    free-tier Groq path this project defaults to can hit rate limits under
+    real demo traffic, and providers occasionally retire/rename a model
+    entirely (this happened once already during development - the original
+    default model, llama-3.3-70b-versatile, was retired by Groq and started
+    returning "model_not_found"). Rather than the whole chatbot going down
+    when that happens, Agno's built-in FallbackConfig automatically retries
+    the request against the next model in the list.
+
+    Only wired up for Groq today (the recommended, free path). Customize the
+    fallback order via GROQ_FALLBACK_MODEL_IDS (comma-separated) if Groq
+    changes their lineup again - check console.groq.com for current model
+    IDs, since these do change over time.
+    """
+    if provider != "groq":
+        return None
+
+    from agno.models.groq import Groq
+
+    fallback_ids = [
+        model_id.strip()
+        for model_id in os.getenv(
+            "GROQ_FALLBACK_MODEL_IDS", "llama-3.1-8b-instant,groq/compound-mini"
+        ).split(",")
+        if model_id.strip()
+    ]
+    if not fallback_ids:
+        return None
+
+    fallback_models = [Groq(id=model_id) for model_id in fallback_ids]
+    return FallbackConfig(on_rate_limit=fallback_models, on_error=fallback_models)
+
+
+def build_agent(session_id: str | None = None, query_log: list[dict[str, Any]] | None = None) -> Agent:
+    """Construct the Payment Performance Intelligence Assistant agent.
+
+    `query_log`, if provided, is the list that `run_sql_query` appends to on
+    every successful query (sql text + columns + rows). The UI layer
+    (app.py) passes in a list it holds onto per browser session, then reads
+    the last entry after each `agent.run(...)` call to show the exact SQL
+    behind an answer and, where possible, render a chart from it - without
+    the agent itself needing to know anything about charts or transparency
+    UI. If omitted, a throwaway list is used (tools still work, there's just
+    nothing outside the agent watching the log).
     """
     if query_log is None:
         query_log = []
 
+    run_sql_query, search_glossary = make_tools(query_log)
+    db = SqliteDb(db_file=str(SESSION_DB_PATH))
     model, provider = _resolve_model()
-    fallback_config = _resolve_fallback_config(provider)
 
-    # Performance specialist: reuses the exact agent + instructions the
-    # single-agent version has always used, just given an explicit `role`
-    # so the team leader knows when to route to it.
-    perf_run_sql_query, perf_search_glossary = make_tools(query_log)
-    performance_agent = Agent(
-        name="Payment Performance Assistant",
-        role=(
-            "General approval-rate, decline-breakdown (issuer/network "
-            "categories), market/channel/merchant-category comparisons, "
-            "and metric definitions."
-        ),
+    return Agent(
+        name="Payment Performance Intelligence Assistant",
         model=model,
-        fallback_config=fallback_config,
-        db=SqliteDb(db_file=str(SESSION_DB_PATH)),
-        session_id=f"{session_id}-performance" if session_id else None,
-        tools=[perf_run_sql_query, perf_search_glossary],
+        fallback_config=_resolve_fallback_config(provider),
+        db=db,
+        session_id=session_id,
+        tools=[run_sql_query, search_glossary],
         instructions=AGENT_INSTRUCTIONS,
         add_history_to_context=True,
         num_history_runs=6,
-        markdown=True,
-    )
-
-    # Risk specialist: same tools/schema, different playbook.
-    risk_run_sql_query, risk_search_glossary = make_tools(query_log)
-    risk_agent = Agent(
-        name="Risk & Fraud Analyst",
-        role=(
-            "Fraud patterns, risk-rule tuning, velocity limits, CVV "
-            "mismatches, restricted-card declines, and chargeback/fraud "
-            "investigation."
-        ),
-        model=model,
-        fallback_config=fallback_config,
-        db=SqliteDb(db_file=str(SESSION_DB_PATH)),
-        session_id=f"{session_id}-risk" if session_id else None,
-        tools=[risk_run_sql_query, risk_search_glossary],
-        instructions=RISK_AGENT_INSTRUCTIONS,
-        add_history_to_context=True,
-        num_history_runs=6,
-        markdown=True,
-    )
-
-    return Team(
-        name="Payment Performance Intelligence Team",
-        model=model,
-        fallback_config=fallback_config,
-        members=[performance_agent, risk_agent],
-        mode="route",
-        respond_directly=True,
-        session_id=session_id,
-        instructions=TEAM_ROUTING_INSTRUCTIONS,
         markdown=True,
     )
