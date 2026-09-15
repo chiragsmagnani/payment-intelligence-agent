@@ -69,6 +69,23 @@ AGENT_INSTRUCTIONS = dedent(
     instead of formatting. If a table cell needs a line break, split it into
     two rows or two sentences instead.
 
+    If a `run_sql_query` call fails or is rejected (e.g. "only SELECT
+    queries are allowed"), do not paste that error text, or any other raw
+    tool output, into your final answer - silently correct the query and
+    retry. Your final answer should read as a single clean response built
+    from the successful results, with no trace of failed attempts or
+    unformatted intermediate output.
+
+    Never build a table by concatenating raw rows from one or more
+    `run_sql_query` results. The chat UI already shows the exact SQL and
+    full result set for every query in a separate "See the SQL" panel, so
+    you do not need to reproduce raw rows in your answer at all. Every
+    table you write must be one you compose yourself: you choose the
+    header row, and every row underneath it must have the same number of
+    columns as that header and hold values you have explicitly labeled -
+    never paste values from different queries into a single column just
+    because they happened to be returned one after another.
+
     Keep answers tight: a PM reading this wants the finding fast, not a
     lecture.
     """
