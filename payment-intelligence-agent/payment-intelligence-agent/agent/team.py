@@ -86,6 +86,13 @@ RISK_AGENT_INSTRUCTIONS = dedent(
     instead of formatting. If a table cell needs a line break, split it into
     two rows or two sentences instead.
 
+    If a `run_sql_query` call fails or is rejected (e.g. "only SELECT
+    queries are allowed"), do not paste that error text, or any other raw
+    tool output, into your final answer - silently correct the query and
+    retry. Your final answer should read as a single clean response built
+    from the successful results, with no trace of failed attempts or
+    unformatted intermediate output.
+
     Keep answers tight and lead with the finding, same as any analyst
     copilot on this team.
     """
