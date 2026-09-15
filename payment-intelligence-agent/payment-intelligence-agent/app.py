@@ -274,5 +274,6 @@ if prompt:
         query_log_slice = st.session_state.query_log[log_before:]
         _render_query_transparency(st.session_state.query_log, log_before)
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": answer, "query_log_slice":
+        st.session_state.messages.append(
+        {"role": "assistant", "content": answer, "query_log_slice": query_log_slice}
+    )
